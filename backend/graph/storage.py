@@ -4,15 +4,22 @@
 import json
 import os
 import threading
+import unicodedata
 from typing import Dict, List, Optional
 from backend.utils.config import GRAPH_DIR, GRAPH_SHARDS
+
+
+def _search_key(text: str) -> str:
+    """生成检索用的规范化文本，兼容 PDF 提取残留的空白和兼容字符"""
+    return ''.join(unicodedata.normalize('NFKC', text).split()).casefold()
 
 
 class GraphStorage:
     """图谱存储管理器 - 按实体类型分片"""
 
     def __init__(self):
-        self.lock = threading.Lock()
+        # add_relation 会在同一临界区内继续添加实体，使用可重入锁
+        self.lock = threading.RLock()
         self._ensure_directories()
         self._cache = {}
         self._load_all_shards()
@@ -145,10 +152,15 @@ class GraphStorage:
 
     def search_entities(self, keyword: str) -> List[Dict]:
         """搜索实体"""
+        normalized_keyword = _search_key(keyword)
+        if not normalized_keyword:
+            return []
+
         results = []
         for entity_type, shard in self._cache.items():
             for entity_text, entity_data in shard['entities'].items():
-                if keyword in entity_text:
+                normalized_entity = _search_key(entity_text)
+                if normalized_keyword in normalized_entity:
                     results.append(entity_data)
         return results
 
