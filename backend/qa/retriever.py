@@ -2,7 +2,7 @@
 语义检索模块 - 基于图谱的语义检索
 """
 from typing import List, Dict
-from backend.graph.storage import GraphStorage
+from backend.graph.storage import GraphStorage, normalize_match_text
 from backend.nlp.tokenizer import ChineseTokenizer
 
 
@@ -21,8 +21,16 @@ class SemanticRetriever:
         # 提取关键词（过滤停用词）
         keywords = [kw for kw in keywords if len(kw) > 1]
 
-        # 搜索相关实体
+        # 搜索相关实体。分词结果之外，再用规范化后的完整问题做一次包含匹配，
+        # 兼容“清华大学是什么”这类实体名成为问句子串、而不是关键词子串的情况。
         relevant_entities = []
+        normalized_query = normalize_match_text(query)
+        all_entities = self.storage.get_all_entities()
+        relevant_entities.extend(
+            entity for entity in all_entities
+            if (normalize_match_text(entity['text']) in normalized_query or
+                    normalized_query in normalize_match_text(entity['text']))
+        )
         for keyword in keywords:
             entities = self.storage.search_entities(keyword)
             relevant_entities.extend(entities)
@@ -48,11 +56,11 @@ class SemanticRetriever:
 
     def _score_results(self, query: str, entities: List[Dict], relations: List[Dict]) -> List[Dict]:
         """计算结果相关性分数"""
-        query_keywords = set(self.tokenizer.tokenize(query))
+        query_keywords = {normalize_match_text(kw) for kw in self.tokenizer.tokenize(query)}
 
         scored = []
         for entity in entities:
-            entity_keywords = set(self.tokenizer.tokenize(entity['text']))
+            entity_keywords = {normalize_match_text(kw) for kw in self.tokenizer.tokenize(entity['text'])}
             overlap = len(query_keywords & entity_keywords)
             score = overlap / max(len(query_keywords), 1)
             scored.append({
@@ -63,7 +71,7 @@ class SemanticRetriever:
 
         for relation in relations:
             rel_text = f"{relation['subject']} {relation['predicate']} {relation['object']}"
-            rel_keywords = set(self.tokenizer.tokenize(rel_text))
+            rel_keywords = {normalize_match_text(kw) for kw in self.tokenizer.tokenize(rel_text)}
             overlap = len(query_keywords & rel_keywords)
             score = overlap / max(len(query_keywords), 1)
             scored.append({

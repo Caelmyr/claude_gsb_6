@@ -3,9 +3,16 @@
 """
 import json
 import os
+import re
 import threading
 from typing import Dict, List, Optional
 from backend.utils.config import GRAPH_DIR, GRAPH_SHARDS
+
+
+def normalize_match_text(text: str) -> str:
+    """去除空白和不可见字符，兼容PDF提取产生的异常空格。"""
+    invisible_chars = ''.join(chr(code) for code in range(0x200b, 0x2010)) + chr(0xfeff)
+    return re.sub(r'[\s' + re.escape(invisible_chars) + r']+', '', str(text))
 
 
 class GraphStorage:
@@ -41,29 +48,34 @@ class GraphStorage:
     def add_entity(self, entity_text: str, entity_type: str, properties: Dict = None):
         """添加实体"""
         with self.lock:
-            if entity_type not in self._cache:
-                self._cache[entity_type] = {'entities': {}, 'relations': []}
+            self._add_entity_unlocked(entity_text, entity_type, properties)
 
-            if entity_text not in self._cache[entity_type]['entities']:
-                self._cache[entity_type]['entities'][entity_text] = {
-                    'id': f"{entity_type}_{len(self._cache[entity_type]['entities'])}",
-                    'text': entity_text,
-                    'type': entity_type,
-                    'properties': properties or {},
-                    'count': 1
-                }
-            else:
-                self._cache[entity_type]['entities'][entity_text]['count'] += 1
+    def _add_entity_unlocked(self, entity_text: str, entity_type: str,
+                             properties: Dict = None):
+        """在已持有写锁时添加实体。"""
+        if entity_type not in self._cache:
+            self._cache[entity_type] = {'entities': {}, 'relations': []}
 
-            self._save_shard(entity_type)
+        if entity_text not in self._cache[entity_type]['entities']:
+            self._cache[entity_type]['entities'][entity_text] = {
+                'id': f"{entity_type}_{len(self._cache[entity_type]['entities'])}",
+                'text': entity_text,
+                'type': entity_type,
+                'properties': properties or {},
+                'count': 1
+            }
+        else:
+            self._cache[entity_type]['entities'][entity_text]['count'] += 1
+
+        self._save_shard(entity_type)
 
     def add_relation(self, subject: str, subject_type: str, predicate: str,
                      obj: str, object_type: str, properties: Dict = None):
         """添加关系"""
         with self.lock:
             # 确保实体存在
-            self.add_entity(subject, subject_type)
-            self.add_entity(obj, object_type)
+            self._add_entity_unlocked(subject, subject_type)
+            self._add_entity_unlocked(obj, object_type)
 
             # 添加关系到主语所在分片
             if subject_type not in self._cache:
@@ -86,17 +98,21 @@ class GraphStorage:
 
     def get_entity(self, entity_text: str) -> Optional[Dict]:
         """获取实体信息"""
+        normalized_text = normalize_match_text(entity_text)
         for entity_type, shard in self._cache.items():
-            if entity_text in shard['entities']:
-                return shard['entities'][entity_text]
+            for stored_text, entity in shard['entities'].items():
+                if normalize_match_text(stored_text) == normalized_text:
+                    return entity
         return None
 
     def get_entity_relations(self, entity_text: str) -> List[Dict]:
         """获取实体的所有关系"""
+        normalized_text = normalize_match_text(entity_text)
         relations = []
         for entity_type, shard in self._cache.items():
             for relation in shard['relations']:
-                if relation['subject'] == entity_text or relation['object'] == entity_text:
+                if (normalize_match_text(relation['subject']) == normalized_text or
+                        normalize_match_text(relation['object']) == normalized_text):
                     relations.append(relation)
         return relations
 
@@ -145,10 +161,12 @@ class GraphStorage:
 
     def search_entities(self, keyword: str) -> List[Dict]:
         """搜索实体"""
+        normalized_keyword = normalize_match_text(keyword)
         results = []
         for entity_type, shard in self._cache.items():
             for entity_text, entity_data in shard['entities'].items():
-                if keyword in entity_text:
+                normalized_entity = normalize_match_text(entity_text)
+                if normalized_keyword in normalized_entity:
                     results.append(entity_data)
         return results
 
